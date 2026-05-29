@@ -8,7 +8,7 @@ from javax.net.ssl import SSLContext, X509TrustManager, KeyManagerFactory
 from java.io import FileInputStream, ByteArrayOutputStream, File
 from java.security import KeyStore
 from java.lang import String as JString
-from javax.swing import JPanel, JLabel, JTextField, JButton, JFileChooser, JTextArea, JScrollPane, BorderFactory, SwingUtilities
+from javax.swing import JPanel, JLabel, JTextField, JButton, JFileChooser, JTextArea, JScrollPane, BorderFactory
 from java.awt import GridBagLayout, GridBagConstraints, Insets, BorderLayout
 
 class CustomHttpService(IHttpService):
@@ -59,14 +59,13 @@ class BurpExtender(IBurpExtender, IHttpListener, ITab, IExtensionStateListener):
         self.init_ui()
         callbacks.addSuiteTab(self)
         
-        self.ui_log("[*] Extension Loaded in DORMANT state. Sockets are unbound.")
-        self.ui_log("[*] Click 'Start Interceptor Listener' below to initialize the pipeline.")
+        self.ui_log("[*] Extension Loaded. Engine is dormant until Start button is clicked.")
 
     def getTabCaption(self): return "Murex RMI Intercept"
     def getUiComponent(self): return self.main_panel
 
     def extensionUnloaded(self):
-        self.ui_log("[*] Extension unload event detected. Cleaning up active components...")
+        self.ui_log("[*] Extension unload event detected. Cleaning up sockets...")
         self.stop_interceptor()
 
     def init_ui(self):
@@ -111,14 +110,14 @@ class BurpExtender(IBurpExtender, IHttpListener, ITab, IExtensionStateListener):
         self.main_panel.add(scroll_logs, BorderLayout.CENTER)
 
     def ui_log(self, message):
+        """Thread-safe direct logging engine without Swing UI locking wrappers"""
         print(message)
         sys.stdout.flush()
         try:
-            def append_text():
-                self.txt_logs.append(message + "\n")
-                self.txt_logs.setCaretPosition(self.txt_logs.getDocument().getLength())
-            SwingUtilities.invokeLater(append_text)
-        except Exception: pass
+            self.txt_logs.append(message + "\n")
+            self.txt_logs.setCaretPosition(self.txt_logs.getDocument().getLength())
+        except Exception:
+            pass
 
     def btn_browse_clicked(self, event):
         chooser = JFileChooser()
@@ -206,35 +205,38 @@ class BurpExtender(IBurpExtender, IHttpListener, ITab, IExtensionStateListener):
     def handle_client(self, client_sock):
         server_sock = None
         try:
+            self.ui_log("[*] Inbound connection accepted from client.")
             server_sock = Socket()
             with self.connections_lock:
                 if not self.is_running: return
                 self.active_connections.append(server_sock)
             
             server_sock.connect(InetSocketAddress(self.target_host, self.target_port), 5000)
+            self.ui_log("[+] Outbound connection linked to Westpac backend.")
             
             client_in = client_sock.getInputStream()
             client_out = client_sock.getOutputStream()
             server_in = server_sock.getInputStream()
             server_out = server_sock.getOutputStream()
             
-            # Phase 1: Dynamic Handshake Protocol Extraction
+            # Step 1: Mimic NoPE Proxy Unencrypted Byte Pass-Through Mode
             c2s_init = jarray.zeros(7, 'b')
             c2s_read = 0
             while c2s_read < 7:
                 res = client_in.read(c2s_init, c2s_read, 7 - c2s_read)
-                if res == -1: raise Exception("Client disconnected during handshake")
+                if res == -1: raise Exception("Client disconnected during initial negotiation")
                 c2s_read += res
             
-            self.ui_log("[C2S Handshake] Forwarding 7-byte RMI header to server.")
+            self.ui_log("[C2S Handshake] Forwarded plain text header to server.")
             server_out.write(c2s_init, 0, 7)
             server_out.flush()
             
+            # Read whatever length the server acknowledges with dynamically without a rigid byte loop
             s2c_buf = jarray.zeros(1024, 'b')
             s2c_bytes_read = server_in.read(s2c_buf)
-            if s2c_bytes_read == -1: raise Exception("Server closed channel during handshake negotiation")
+            if s2c_bytes_read == -1: raise Exception("Server rejected handshake mapping sequence")
             
-            self.ui_log("[S2C Handshake] Received acknowledgment packet ({} bytes). Forwarding to client.".format(s2c_bytes_read))
+            self.ui_log("[S2C Handshake] Received plain text acknowledgment ({} bytes). Forwarding to client.".format(s2c_bytes_read))
             client_out.write(s2c_buf, 0, s2c_bytes_read)
             client_out.flush()
             
@@ -243,15 +245,15 @@ class BurpExtender(IBurpExtender, IHttpListener, ITab, IExtensionStateListener):
             java.lang.System.arraycopy(s2c_buf, 0, logged_s2c, 0, s2c_bytes_read)
             self.log_to_burp(c2s_init, logged_s2c, "handshake_initialization")
             
-            # Phase 2: Concurrent Multi-Threaded TLS Upgrade (Prevents sequential deadlocks)
-            self.ui_log("[*] [TLS] Layering SSL wrappers onto raw sockets...")
+            # Step 2: Now that plain-text negotiation is complete, dynamically hook the TLS layer
+            self.ui_log("[*] Interception point reached: Initializing inline TLS decryption upgrade...")
             ssl_client = self.ssl_context.getSocketFactory().createSocket(client_sock, client_sock.getInetAddress().getHostAddress(), client_sock.getPort(), True)
             ssl_client.setUseClientMode(False)
             
             ssl_server = self.ssl_context.getSocketFactory().createSocket(server_sock, self.target_host, self.target_port, True)
             ssl_server.setUseClientMode(True)
             
-            self.ui_log("[*] [TLS] Spawning parallel cryptographic handshakes...")
+            # Parallel execution blocks race-conditions and blocking timeouts
             t_client = threading.Thread(target=ssl_client.startHandshake)
             t_server = threading.Thread(target=ssl_server.startHandshake)
             t_client.start()
@@ -259,7 +261,7 @@ class BurpExtender(IBurpExtender, IHttpListener, ITab, IExtensionStateListener):
             
             t_client.join(timeout=5)
             t_server.join(timeout=5)
-            self.ui_log("[+] [TLS] Dual handshake negotiation arrays verified and established.")
+            self.ui_log("[+] TLS Sessions fully established. Commencing cleartext capture pipelines.")
             
             # Phase 3: Duplex Pipeline Execution Loop
             t1 = threading.Thread(target=self.stream_pipe, args=(ssl_client, ssl_server, True, client_sock, server_sock))
@@ -268,7 +270,7 @@ class BurpExtender(IBurpExtender, IHttpListener, ITab, IExtensionStateListener):
             t2.start()
             
         except Exception, e:
-            if self.is_running: self.ui_log("[-] Pipeline Broken: {}".format(str(e)))
+            if self.is_running: self.ui_log("[-] Pipeline Stalled/Broken: {}".format(str(e)))
             self.cleanup_sockets(client_sock, server_sock)
 
     def stream_pipe(self, src, dst, is_c2s, raw_client, raw_server):
@@ -285,19 +287,18 @@ class BurpExtender(IBurpExtender, IHttpListener, ITab, IExtensionStateListener):
                 out.write(buf, 0, bytes_read)
                 data_bytes = out.toByteArray()
                 
-                # CRITICAL AUTOMATION FIX: Re-write dynamic server IP targets to 127.0.0.1 on-the-fly
+                # Dynamic Automation Tab Mapping Emulator
                 if not is_c2s:
                     data_str = JString(data_bytes, "ISO-8859-1")
                     if data_str.contains(self.target_host):
-                        self.ui_log("[AUTOMATION] Rewriting embedded target endpoint IP {} to 127.0.0.1".format(self.target_host))
+                        self.ui_log("[AUTOMATION] Rewriting server metadata address block {} to 127.0.0.1".format(self.target_host))
                         data_str = data_str.replace(self.target_host, "127.0.0.1")
                         data_bytes = data_str.getBytes("ISO-8859-1")
                 
-                # Deliver payload to destination array interface
                 dst.getOutputStream().write(data_bytes)
                 dst.getOutputStream().flush()
                 
-                self.ui_log("[TRANSMISSION] {} | Intercepted: {} bytes".format(direction, len(data_bytes)))
+                self.ui_log("[TRANSMISSION] {} | Decrypted payload captured: {} bytes".format(direction, len(data_bytes)))
                 
                 if is_c2s: self.log_to_burp(data_bytes, None, endpoint_lbl)
                 else: self.log_to_burp(None, data_bytes, endpoint_lbl)
