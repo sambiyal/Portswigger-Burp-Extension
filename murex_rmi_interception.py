@@ -7,10 +7,10 @@ import datetime
 import java.awt
 from java.net import ServerSocket, Socket, InetSocketAddress
 from javax.net.ssl import SSLContext, X509TrustManager, KeyManagerFactory
-from java.io import FileInputStream, ByteArrayOutputStream, File
+from java.io import FileInputStream, ByteArrayOutputStream, File, PushbackInputStream
 from java.security import KeyStore
 from java.lang import String as JString
-from javax.swing import JPanel, JLabel, JTextField, JButton, JFileChooser, JTextArea, JScrollPane, BorderFactory, SwingUtilities, JCheckBox, JTabbedPane, JTable, JSplitPane
+from javax.swing import JPanel, JLabel, JTextField, JButton, JFileChooser, JTextArea, JScrollPane, BorderFactory, SwingUtilities, JTabbedPane, JTable, JSplitPane
 from javax.swing.table import DefaultTableModel
 from javax.swing.event import ListSelectionListener
 from java.awt import GridBagLayout, GridBagConstraints, Insets, BorderLayout
@@ -80,7 +80,7 @@ class BurpExtender(IBurpExtender, IHttpListener, ITab, IExtensionStateListener):
         
         self.init_ui()
         callbacks.addSuiteTab(self)
-        self.ui_log("[*] Interceptor loaded. Ready to trace StartTLS transitions.")
+        self.ui_log("[*] Adaptive Multi-Protocol Interceptor loaded.")
 
     def getTabCaption(self): return "Murex RMI Intercept"
     def getUiComponent(self): return self.main_panel
@@ -296,32 +296,40 @@ class BurpExtender(IBurpExtender, IHttpListener, ITab, IExtensionStateListener):
             with self.connections_lock: self.active_connections.append(server_sock)
             server_sock.connect(InetSocketAddress(self.target_host, self.local_port), 5000)
             
-            client_in = client_sock.getInputStream()
-            client_out = client_sock.getOutputStream()
+            # Use PushbackInputStream to peek at the protocol type dynamically
+            client_in = PushbackInputStream(client_sock.getInputStream(), 7)
             server_in = server_sock.getInputStream()
             server_out = server_sock.getOutputStream()
             
-            # Step 1: Read the 7-byte plain-text string from the client
-            c2s_init = jarray.zeros(7, 'b')
-            c2s_read = 0
-            while c2s_read < 7:
-                res = client_in.read(c2s_init, c2s_read, 7 - c2s_read)
-                if res == -1: raise Exception("Client connection dropped prematurely")
-                c2s_read += res
+            peek_buf = jarray.zeros(3, 'b')
+            bytes_peeked = client_in.read(peek_buf, 0, 3)
             
-            self.ui_log_packet("HANDSHAKE (CLIENT -> SERVER)", 7, c2s_init)
+            is_implicit_tls = False
+            if bytes_peeked == 3:
+                # 0x16 0x03 0x01 / 0x02 / 0x03 indicates an immediate TLS handshake record
+                if peek_buf[0] == 0x16 and peek_buf[1] == 0x03:
+                    is_implicit_tls = True
+                client_in.unread(peek_buf, 0, bytes_peeked) # Push bytes back to the stream
             
-            # Step 2: Forward the 7 bytes directly to the real server
-            server_out.write(c2s_init, 0, 7)
-            server_out.flush()
+            if not is_implicit_tls:
+                self.ui_log("[*] Plain text StartTLS handshake detected. Processing JRMI headers...")
+                c2s_init = jarray.zeros(7, 'b')
+                c2s_read = 0
+                while c2s_read < 7:
+                    res = client_in.read(c2s_init, c2s_read, 7 - c2s_read)
+                    if res == -1: raise Exception("Client closed connection prematurely")
+                    c2s_read += res
+                
+                self.ui_log_packet("HANDSHAKE (CLIENT -> SERVER)", 7, c2s_init)
+                server_out.write(c2s_init, 0, 7)
+                server_out.flush()
+            else:
+                self.ui_log("[*] Pure Implicit TLS detected. Skipping plain text phase.")
             
-            # FIXED: Do NOT pause to read from the server here.
-            # Proceed directly to launching concurrent TLS upgrades.
-            self.ui_log("[*] Handshake forwarded. Instantly initializing parallel TLS layers...")
-            
-            ssl_client = self.ssl_context.getSocketFactory().createSocket(client_sock, None, True)
+            # Upgrade both sockets to TLS simultaneously
+            ssl_client = self.ssl_context.getSocketFactory().createSocket(client_sock, client_in, True)
             ssl_client.setUseClientMode(False)
-            ssl_server = self.ssl_context.getSocketFactory().createSocket(server_sock, None, True)
+            ssl_server = self.ssl_context.getSocketFactory().createSocket(server_sock, server_in, True)
             ssl_server.setUseClientMode(True)
             
             t_client = threading.Thread(target=ssl_client.startHandshake)
@@ -333,7 +341,6 @@ class BurpExtender(IBurpExtender, IHttpListener, ITab, IExtensionStateListener):
             t_server.join(timeout=5)
             self.ui_log("[+] TLS session handshakes successfully established.")
             
-            # Step 3: Spin active duplex cleartext transmission tunnels
             t1 = threading.Thread(target=self.stream_pipe, args=(ssl_client, ssl_server, True, client_sock, server_sock))
             t2 = threading.Thread(target=self.stream_pipe, args=(ssl_server, ssl_client, False, client_sock, server_sock))
             t1.start()
