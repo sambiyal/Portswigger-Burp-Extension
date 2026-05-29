@@ -62,7 +62,6 @@ class BurpExtender(IBurpExtender, IHttpListener, ITab, IExtensionStateListener):
         callbacks.addSuiteTab(self)
         
         self.ui_log("[*] Interceptor extension initialized successfully.")
-        self.ui_log("[*] Double-click rows inside 'Packet Inspector' to view payload string cuts.")
 
     def getTabCaption(self): return "Murex RMI Intercept"
     def getUiComponent(self): return self.main_panel
@@ -72,15 +71,11 @@ class BurpExtender(IBurpExtender, IHttpListener, ITab, IExtensionStateListener):
         self.stop_interceptor()
 
     def init_ui(self):
-        # Base Application Container Window
         self.main_panel = JPanel(BorderLayout())
-        
-        # Initialize Multi-Tab Layout Interface
         self.tab_container = JTabbedPane()
         
         # ==================== TAB 1: CONTROL DASHBOARD ====================
         tab_control = JPanel(BorderLayout())
-        
         config_panel = JPanel(GridBagLayout())
         config_panel.setBorder(BorderFactory.createTitledBorder("Interceptor Configurations"))
         gbc = GridBagConstraints()
@@ -126,7 +121,6 @@ class BurpExtender(IBurpExtender, IHttpListener, ITab, IExtensionStateListener):
         # ==================== TAB 2: PACKET INSPECTOR ====================
         tab_inspector = JPanel(BorderLayout())
         
-        # Construct traffic visualization data tables
         self.table_model = DefaultTableModel(["ID", "Transmission Context", "Size (Bytes)", "Data Stream Preview"], 0)
         self.packet_table = JTable(self.table_model)
         self.packet_table.setAutoResizeMode(JTable.AUTO_RESIZE_LAST_COLUMN)
@@ -143,13 +137,11 @@ class BurpExtender(IBurpExtender, IHttpListener, ITab, IExtensionStateListener):
         tab_inspector.add(scroll_table, BorderLayout.CENTER)
         tab_inspector.add(btn_clear_table, BorderLayout.SOUTH)
         
-        # Assemble Tabs into master module container frame layout
         self.tab_container.addTab("Control Dashboard", tab_control)
         self.tab_container.addTab("Packet Inspector", tab_inspector)
         self.main_panel.add(self.tab_container, BorderLayout.CENTER)
 
     def ui_log(self, message):
-        """Thread-safe log utility for system operations"""
         print(message)
         sys.stdout.flush()
         class LogUpdateWorker(vars(threading)['Thread']):
@@ -164,28 +156,30 @@ class BurpExtender(IBurpExtender, IHttpListener, ITab, IExtensionStateListener):
         SwingUtilities.invokeLater(worker)
 
     def ui_log_packet(self, direction, byte_count, raw_bytes):
-        """Injects decrypted packet payloads straight into the GUI ledger grid view"""
+        """Processes byte array slices securely using native JVM string properties"""
         self.packet_counter += 1
-        
-        # Extract readable string blocks from stream array slice safely
-        data_str = JString(raw_bytes, "ISO-8859-1")
-        if len(data_str) > 120:
-            data_str = data_str.substring(0, 120) + "..."
-            
-        # Strip control layout bytes to present clear ASCII representations
-        clean_chars = []
-        for i in range(len(data_str)):
-            char_code = ord(data_str[i])
-            if 32 <= char_code <= 126:
-                clean_chars.append(data_str[i])
+        try:
+            j_str = JString(raw_bytes, "ISO-8859-1")
+            # FIX: Swapped out Python 'len()' for native Java '.length()' interface method
+            if j_str.length() > 120:
+                display_str = j_str.substring(0, 120) + "..."
             else:
-                clean_chars.append(".")
-        preview_string = "".join(clean_chars)
+                display_str = j_str
+                
+            clean_chars = []
+            for i in range(display_str.length()):
+                char_code = display_str.charAt(i)
+                if 32 <= char_code <= 126:
+                    clean_chars.append(chr(char_code))
+                else:
+                    clean_chars.append(".")
+            preview_string = "".join(clean_chars)
+        except Exception, e:
+            preview_string = "[Preview rendering exception: {}]".format(str(e))
         
         class TableUpdateWorker(vars(threading)['Thread']):
             def run(self):
-                try:
-                    self.ext.table_model.addRow([self.pid, self.direction, self.size, self.preview])
+                try: self.ext.table_model.addRow([self.pid, self.direction, self.size, self.preview])
                 except: pass
         worker = TableUpdateWorker()
         worker.ext = self
@@ -194,6 +188,13 @@ class BurpExtender(IBurpExtender, IHttpListener, ITab, IExtensionStateListener):
         worker.size = str(byte_count)
         worker.preview = preview_string
         SwingUtilities.invokeLater(worker)
+
+    def get_safe_length(self, byte_array):
+        if byte_array is None: return 0
+        try: return len(byte_array)
+        except:
+            if hasattr(byte_array, 'length'): return byte_array.length
+            return 0
 
     def btn_browse_clicked(self, event):
         chooser = JFileChooser()
@@ -299,7 +300,6 @@ class BurpExtender(IBurpExtender, IHttpListener, ITab, IExtensionStateListener):
             server_in = server_sock.getInputStream()
             server_out = server_sock.getOutputStream()
             
-            # Phase 1: Unencrypted Initialization Sequence
             c2s_init = jarray.zeros(7, 'b')
             c2s_read = 0
             while c2s_read < 7:
@@ -325,7 +325,6 @@ class BurpExtender(IBurpExtender, IHttpListener, ITab, IExtensionStateListener):
             
             self.log_to_burp(c2s_init, logged_s2c, "handshake_initialization")
             
-            # Phase 2: Parallel Handshake Upgrades
             self.ui_log("[*] Performing parallel secure session upgrades...")
             ssl_client = self.ssl_context.getSocketFactory().createSocket(client_sock, client_sock.getInetAddress().getHostAddress(), client_sock.getPort(), True)
             ssl_client.setUseClientMode(False)
@@ -340,9 +339,8 @@ class BurpExtender(IBurpExtender, IHttpListener, ITab, IExtensionStateListener):
             
             t_client.join(timeout=5)
             t_server.join(timeout=5)
-            self.ui_log("[+] Sockets upgraded. Duplex intercept pipes active.")
+            self.ui_log("[+] Secure sessions verified. Commencing data capture tunnels.")
             
-            # Phase 3: Duplex Transmission Pipelines
             t1 = threading.Thread(target=self.stream_pipe, args=(ssl_client, ssl_server, True, client_sock, server_sock))
             t2 = threading.Thread(target=self.stream_pipe, args=(ssl_server, ssl_client, False, client_sock, server_sock))
             t1.start()
@@ -366,7 +364,6 @@ class BurpExtender(IBurpExtender, IHttpListener, ITab, IExtensionStateListener):
                 out.write(buf, 0, bytes_read)
                 data_bytes = out.toByteArray()
                 
-                # Dynamic String Token Rewriting Engine
                 if not is_c2s and self.should_rewrite:
                     data_str = JString(data_bytes, "ISO-8859-1")
                     if data_str.contains(self.target_host):
@@ -376,8 +373,8 @@ class BurpExtender(IBurpExtender, IHttpListener, ITab, IExtensionStateListener):
                 dst.getOutputStream().write(data_bytes)
                 dst.getOutputStream().flush()
                 
-                # Push decrypted stream event blocks straight to UI ledger grid view rows
-                self.ui_log_packet(direction_label, len(data_bytes), data_bytes)
+                computed_len = self.get_safe_length(data_bytes)
+                self.ui_log_packet(direction_label, computed_len, data_bytes)
                 
                 if is_c2s: self.log_to_burp(data_bytes, None, endpoint_lbl)
                 else: self.log_to_burp(None, data_bytes, endpoint_lbl)
@@ -396,7 +393,10 @@ class BurpExtender(IBurpExtender, IHttpListener, ITab, IExtensionStateListener):
     def log_to_burp(self, request_bytes, response_bytes, endpoint):
         req_body = request_bytes if request_bytes else b""
         res_body = response_bytes if response_bytes else b""
-        http_req = ("POST /{} HTTP/1.1\r\nHost: {}\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\n\r\n").format(endpoint, self.FAKE_HOST, len(req_body)) + req_body
+        req_len = self.get_safe_length(req_body)
+        res_len = self.get_safe_length(res_body)
+        
+        http_req = ("POST /{} HTTP/1.1\r\nHost: {}\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\n\r\n").format(endpoint, self.FAKE_HOST, req_len) + req_body
         http_res = ("HTTP/1.1 200 OK\r\nServer: Murex-RMI-Bridge\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\n\r\n").format(len(res_body)) + res_body
         service = CustomHttpService(self.FAKE_HOST, 80, "http")
         self._callbacks.addToHistory(CustomHttpRequestResponse(http_req, http_res, service))
