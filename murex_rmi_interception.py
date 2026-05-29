@@ -2,6 +2,7 @@
 from burp import IBurpExtender, IHttpListener, IHttpRequestResponse, IHttpService, ITab
 import socket
 import threading
+import sys
 import jarray
 from javax.net.ssl import SSLContext, X509TrustManager, KeyManagerFactory
 from java.io import FileInputStream, ByteArrayOutputStream, File
@@ -50,10 +51,14 @@ class BurpExtender(IBurpExtender, IHttpListener, ITab):
         self.ssl_context = None
         self.FAKE_HOST = "murex-rmi-bridge"
         
-        # Initialize User Interface
+        # Build out the UI
         self.init_ui()
         callbacks.addSuiteTab(self)
-        self.ui_log("[*] murex_rmi_interception UI loaded. Ready to initialize listener.")
+        
+        # Dual-logged startup verification
+        self.ui_log("[*] ========================================================")
+        self.ui_log("[*] MUREX RMI INTERCEPTION LOG ENGINE INITIALIZED SUCCESSFULLY")
+        self.ui_log("[*] ========================================================")
 
     def getTabCaption(self): return "Murex RMI Intercept"
     def getUiComponent(self): return self.main_panel
@@ -66,7 +71,7 @@ class BurpExtender(IBurpExtender, IHttpListener, ITab):
         gbc.insets = Insets(5, 5, 5, 5)
         gbc.fill = GridBagConstraints.HORIZONTAL
         
-        # UI Input Fields
+        # Input Configuration Blocks
         gbc.gridx = 0; gbc.gridy = 0; config_panel.add(JLabel("Local Listen Port:"), gbc)
         self.txt_local_port = JTextField("9101", 10)
         gbc.gridx = 1; gbc.gridy = 0; config_panel.add(self.txt_local_port, gbc)
@@ -80,7 +85,7 @@ class BurpExtender(IBurpExtender, IHttpListener, ITab):
         gbc.gridx = 1; gbc.gridy = 2; config_panel.add(self.txt_target_port, gbc)
         
         gbc.gridx = 0; gbc.gridy = 3; config_panel.add(JLabel("Burp CA Path (.p12):"), gbc)
-        self.txt_keystore_path = JTextField(r"C:\burp\burpca.p12", 30)
+        self.txt_keystore_path = JTextField(r"C:\BurpTesting\burpca.p12", 30)
         gbc.gridx = 1; gbc.gridy = 3; config_panel.add(self.txt_keystore_path, gbc)
         self.btn_browse = JButton("Browse...", actionPerformed=self.btn_browse_clicked)
         gbc.gridx = 2; gbc.gridy = 3; config_panel.add(self.btn_browse, gbc)
@@ -92,22 +97,29 @@ class BurpExtender(IBurpExtender, IHttpListener, ITab):
         self.btn_action = JButton("Start Interceptor Listener", actionPerformed=self.btn_action_clicked)
         gbc.gridx = 1; gbc.gridy = 5; gbc.gridwidth = 2; config_panel.add(self.btn_action, gbc)
         
-        # Log Window Components
-        self.txt_logs = JTextArea(16, 60)
+        # Verbose Console Logging Window
+        self.txt_logs = JTextArea(20, 70)
         self.txt_logs.setEditable(False)
         scroll_logs = JScrollPane(self.txt_logs)
-        scroll_logs.setBorder(BorderFactory.createTitledBorder("Real-Time Connection Activity Logs"))
+        scroll_logs.setBorder(BorderFactory.createTitledBorder("Verbose Engine Stream Activity Logs"))
         
         self.main_panel.add(config_panel, BorderLayout.NORTH)
         self.main_panel.add(scroll_logs, BorderLayout.CENTER)
 
     def ui_log(self, message):
-        # Ensure thread-safe updates to the Java Swing UI container
-        class UpdateLogRunnable(vars(threading)['Thread']):
-            def run(self):
+        """Thread-safe multi-destination logging engine"""
+        # Destination 1: Standard Extender Output Tab Console
+        print(message)
+        sys.stdout.flush()
+        
+        # Destination 2: Custom Tab UI Layout Text Area (Via dynamic thread safety)
+        try:
+            def append_text():
                 self.txt_logs.append(message + "\n")
                 self.txt_logs.setCaretPosition(self.txt_logs.getDocument().getLength())
-        SwingUtilities.invokeLater(UpdateLogRunnable())
+            SwingUtilities.invokeLater(append_text)
+        except Exception, e:
+            print("[-] Logging Exception Encountered: {}".format(str(e)))
 
     def btn_browse_clicked(self, event):
         chooser = JFileChooser()
@@ -115,7 +127,11 @@ class BurpExtender(IBurpExtender, IHttpListener, ITab):
             self.txt_keystore_path.setText(chooser.getSelectedFile().getAbsolutePath())
 
     def btn_action_clicked(self, event):
-        if self.is_running: return
+        if self.is_running:
+            self.ui_log("[-] Warning: Interceptor Core is already deployed and active.")
+            return
+            
+        self.ui_log("[*] Action button pressed. Validating configurations...")
         try:
             self.local_port = int(self.txt_local_port.getText().strip())
             self.target_host = self.txt_target_host.getText().strip()
@@ -123,27 +139,43 @@ class BurpExtender(IBurpExtender, IHttpListener, ITab):
             self.keystore_path = self.txt_keystore_path.getText().strip()
             self.keystore_password = self.txt_keystore_password.getText()
         except ValueError:
-            self.ui_log("[-] Input Validation Error: Check port configurations.")
+            self.ui_log("[-] Validation Error: Port entries must be strictly numerical values.")
             return
 
-        if not self.init_ssl(): return
+        self.ui_log("[*] Configuration parameters validated successfully.")
+        if not self.init_ssl(): 
+            return
         
         self.is_running = True
         self.btn_action.setEnabled(False)
+        self.txt_local_port.setEditable(False)
+        self.txt_target_host.setEditable(False)
+        self.txt_target_port.setEditable(False)
+        self.txt_keystore_path.setEditable(False)
+        self.btn_browse.setEnabled(False)
+        self.txt_keystore_password.setEditable(False)
+        
+        # Fire background socket server
         threading.Thread(target=self.start_local_listener).start()
 
     def init_ssl(self):
+        self.ui_log("[*] Accessing cryptographic trust architecture at: {}".format(self.keystore_path))
+        if not File(self.keystore_path).exists():
+            self.ui_log("[-] Critical Error: Specified KeyStore file target does not exist.")
+            return False
+            
         try:
             ks = KeyStore.getInstance("PKCS12")
             ks.load(FileInputStream(self.keystore_path), list(self.keystore_password))
             kmf = KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm())
             kmf.init(ks, list(self.keystore_password))
+            
             self.ssl_context = SSLContext.getInstance("TLS")
             self.ssl_context.init(kmf.getKeyManagers(), [TrustAllManager()], None)
-            self.ui_log("[+] SSL decryption layer built from selected Keystore.")
+            self.ui_log("[+] SSL cryptographic engine mapped cleanly to context.")
             return True
         except Exception, e:
-            self.ui_log("[-] Cryptographic Startup Error: {}".format(str(e)))
+            self.ui_log("[-] Cryptographic Extraction Defect: {}".format(str(e)))
             return False
 
     def start_local_listener(self):
@@ -152,87 +184,106 @@ class BurpExtender(IBurpExtender, IHttpListener, ITab):
             server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             server.bind(('127.0.0.1', self.local_port))
             server.listen(15)
-            self.ui_log("[+] Core proxy engine actively listening on 127.0.0.1:{}...".format(self.local_port))
+            self.ui_log("[+] SUCCESS: Server socket bound to 127.0.0.1:{}.".format(self.local_port))
+            self.ui_log("[+] Pipeline state: WAITING FOR THICK CLIENT CONNECTION...")
         except Exception, e:
-            self.ui_log("[-] Port Bind Failure: {}".format(str(e)))
+            self.ui_log("[-] Structural Bind Exception: {}".format(str(e)))
             self.is_running = False
             return
         
         while True:
-            client_sock, addr = server.accept()
-            self.ui_log("[*] Incoming client connection accepted from: {}:{}".format(addr[0], addr[1]))
-            threading.Thread(target=self.handle_client, args=(client_sock,)).start()
+            try:
+                client_sock, addr = server.accept()
+                self.ui_log("[*] Connection detected from client endpoint: {}:{}".format(addr[0], addr[1]))
+                threading.Thread(target=self.handle_client, args=(client_sock,)).start()
+            except Exception, e:
+                self.ui_log("[-] Server listener loop encounter tracking error: {}".format(str(e)))
+                break
 
     def handle_client(self, client_sock):
         try:
-            self.ui_log("[*] Establishing link to upstream target server at {}:{}...".format(self.target_host, self.target_port))
+            self.ui_log("[*] Launching network bridge to Westpac server {}:{}...".format(self.target_host, self.target_port))
             server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             server_sock.connect((self.target_host, self.target_port))
+            self.ui_log("[+] Network tunnel established out to backend server.")
             
             # Phase 1: Exchange baseline plain-text 7-byte JRMI handshakes
-            self.ui_log("[*] Intercepting plain-text JRMI handshake header...")
+            self.ui_log("[*] Step 1: Parsing client baseline initialization protocol bytes...")
             c2s_init = client_sock.recv(7)
-            self.ui_log("[C2S] Plain Handshake Header: '{}'".format(c2s_init.encode('string_escape')))
+            self.ui_log("[C2S Data] Hex stream read: '{}' (Size: {})".format(c2s_init.encode('hex'), len(c2s_init)))
+            
+            self.ui_log("[*] Forwarding payload to upstream server...")
             server_sock.sendall(c2s_init)
             
+            self.ui_log("[*] Step 2: Extracting server acknowledgement framework response...")
             s2c_init = server_sock.recv(7)
-            self.ui_log("[S2C] Server Handshake Reply: '{}'".format(s2c_init.encode('string_escape')))
+            self.ui_log("[S2C Data] Hex stream read: '{}' (Size: {})".format(s2c_init.encode('hex'), len(s2c_init)))
+            
+            self.ui_log("[*] Delivering initialization handshake frame to client...")
             client_sock.sendall(s2c_init)
             
             self.log_to_burp(c2s_init, s2c_init, "handshake_initialization")
             
-            # Phase 2: Dynamic Sockets upgrade to SSL/TLS mid-stream (StartTLS Execution)
-            self.ui_log("[*] Initiating mid-stream cryptographic upgrade (StartTLS encapsulation)...")
+            # Phase 2: Structural mid-stream socket upgrade to TLS (StartTLS Execution)
+            self.ui_log("[*] Step 3: Upgrading socket communication array into secure TLS envelope...")
+            
             ssl_client = self.ssl_context.getSocketFactory().createSocket(client_sock, client_sock.getInetAddress().getHostAddress(), client_sock.getPort(), True)
             ssl_client.setUseClientMode(False)
+            self.ui_log("[*] Executing inbound TLS Handshake sequence against client application...")
             ssl_client.startHandshake()
-            self.ui_log("[+] Client TLS Handshake completed successfully.")
+            self.ui_log("[+] Inbound verification: Client TLS Handshake fully established.")
             
             ssl_server = self.ssl_context.getSocketFactory().createSocket(server_sock, self.target_host, self.target_port, True)
             ssl_server.setUseClientMode(True)
+            self.ui_log("[*] Executing outbound TLS Handshake sequence against Westpac backend...")
             ssl_server.startHandshake()
-            self.ui_log("[+] Upstream Server TLS Handshake completed successfully.")
+            self.ui_log("[+] Outbound verification: Server TLS Handshake fully established.")
             
-            # Phase 3: Launch streaming pipelines using native Java byte arrays to eliminate blocking
-            self.ui_log("[+] Sockets upgraded. Initializing real-time data streaming loops.")
+            # Phase 3: Launch streaming pipelines using native Java byte arrays
+            self.ui_log("[+] Step 4: Sockets successfully encrypted. Starting duplex transmission loops.")
             t1 = threading.Thread(target=self.stream_pipe, args=(ssl_client, ssl_server, True))
             t2 = threading.Thread(target=self.stream_pipe, args=(ssl_server, ssl_client, False))
             t1.start()
             t2.start()
             
         except Exception, e:
-            self.ui_log("[-] Connection pipeline tracking broken: {}".format(str(e)))
+            self.ui_log("[-] Connection pipeline tracking broken during setup: {}".format(str(e)))
+            try: client_sock.close()
+            except: pass
+            try: server_sock.close()
+            except: pass
 
     def stream_pipe(self, src, dst, is_c2s):
-        # Using a native Java byte array prevents Jython from blocking indefinitely on read()
         buf = jarray.zeros(4096, 'b')
-        direction = "C2S" if is_c2s else "S2C"
+        direction = "CLIENT -> SERVER" if is_c2s else "SERVER -> CLIENT"
+        endpoint_lbl = "rmi_data_c2s" if is_c2s else "rmi_data_s2c"
+        
         try:
             while True:
                 bytes_read = src.getInputStream().read(buf)
                 if bytes_read == -1:
-                    self.ui_log("[*] Connection stream closed by remote endpoint ({}).".format(direction))
+                    self.ui_log("[*] Channel closed gracefully by remote system ({}).".format(direction))
                     break
                 if bytes_read == 0:
                     continue
                 
-                # Extract the exact slice of data read from the buffer
+                # Extract the exact byte slice
                 out = ByteArrayOutputStream()
                 out.write(buf, 0, bytes_read)
                 data_bytes = out.toByteArray()
                 
-                # Forward data to destination
+                # Deliver to target
                 dst.getOutputStream().write(buf, 0, bytes_read)
                 dst.getOutputStream().flush()
                 
-                self.ui_log("[Data Transfer] {} -> Forwarded {} bytes".format(direction, bytes_read))
+                self.ui_log("[TRANSMISSION] {} | Intercepted: {} bytes".format(direction, bytes_read))
                 
                 if is_c2s:
-                    self.log_to_burp(data_bytes, None, "rmi_data_c2s")
+                    self.log_to_burp(data_bytes, None, endpoint_lbl)
                 else:
-                    self.log_to_burp(None, data_bytes, "rmi_data_s2c")
+                    self.log_to_burp(None, data_bytes, endpoint_lbl)
         except Exception, e:
-            self.ui_log("[-] Active stream pipe exception ({}): {}".format(direction, str(e)))
+            self.ui_log("[-] Active stream interface tracking exception ({}): {}".format(direction, str(e)))
         finally:
             try: src.close()
             except: pass
