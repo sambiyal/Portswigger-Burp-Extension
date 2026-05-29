@@ -83,7 +83,7 @@ class BurpExtender(IBurpExtender, IHttpListener, ITab):
         # Row 1: Upstream Target Host
         gbc.gridx = 0; gbc.gridy = 1
         config_panel.add(JLabel("Upstream Target Host/IP:"), gbc)
-        self.txt_target_host = JTextField("10.100.113.45", 20)
+        self.txt_target_host = JTextField("10.10.10.10", 20)
         gbc.gridx = 1; gbc.gridy = 1
         config_panel.add(self.txt_target_host, gbc)
         
