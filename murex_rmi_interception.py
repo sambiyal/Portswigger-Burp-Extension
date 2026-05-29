@@ -59,7 +59,6 @@ class BurpExtender(IBurpExtender, IHttpListener, ITab, IExtensionStateListener):
         callbacks.addSuiteTab(self)
         
         self.ui_log("[*] Extension Loaded in DORMANT state. Sockets are unbound.")
-        self.ui_log("[*] Configure parameters below and click 'Start Interceptor Listener'.")
 
     def getTabCaption(self): return "Murex RMI Intercept"
     def getUiComponent(self): return self.main_panel
@@ -125,10 +124,8 @@ class BurpExtender(IBurpExtender, IHttpListener, ITab, IExtensionStateListener):
             self.txt_keystore_path.setText(chooser.getSelectedFile().getAbsolutePath())
 
     def btn_action_clicked(self, event):
-        if self.is_running:
-            self.stop_interceptor()
-        else:
-            self.start_interceptor()
+        if self.is_running: self.stop_interceptor()
+        else: self.start_interceptor()
 
     def start_interceptor(self):
         try:
@@ -138,37 +135,27 @@ class BurpExtender(IBurpExtender, IHttpListener, ITab, IExtensionStateListener):
             self.keystore_path = self.txt_keystore_path.getText().strip()
             self.keystore_password = self.txt_keystore_password.getText()
         except ValueError:
-            self.ui_log("[-] Input Error: Ports must be valid numeric integers.")
+            self.ui_log("[-] Input Error: Ports must be numeric integers.")
             return
 
         if not self.init_ssl(): return
-        
         self.is_running = True
         self.btn_action.setText("STOP Interceptor Listener")
         self.toggle_ui_fields(False)
-        
         threading.Thread(target=self.start_local_listener).start()
 
     def stop_interceptor(self):
         if not self.is_running and not self.server_socket: return
         self.is_running = False
-        
         if self.server_socket:
-            try:
-                self.server_socket.close()
-                self.ui_log("[+] Native Java server socket listener closed.")
-            except Exception, e:
-                self.ui_log("[-] Error terminating listener: {}".format(str(e)))
+            try: self.server_socket.close()
+            except: pass
             self.server_socket = None
-        
         with self.connections_lock:
-            if self.active_connections:
-                self.ui_log("[*] Forcing closure of {} active connection sockets...".format(len(self.active_connections)))
-                for sock in self.active_connections:
-                    try: sock.close()
-                    except: pass
-                del self.active_connections[:]
-        
+            for sock in self.active_connections:
+                try: sock.close()
+                except: pass
+            del self.active_connections[:]
         self.btn_action.setText("Start Interceptor Listener")
         self.toggle_ui_fields(True)
         self.ui_log("[+] Status Dashboard reverted to DORMANT.")
@@ -182,9 +169,6 @@ class BurpExtender(IBurpExtender, IHttpListener, ITab, IExtensionStateListener):
         self.txt_keystore_password.setEditable(editable_state)
 
     def init_ssl(self):
-        if not File(self.keystore_path).exists():
-            self.ui_log("[-] Target Error: Specified keystore file does not exist.")
-            return False
         try:
             ks = KeyStore.getInstance("PKCS12")
             ks.load(FileInputStream(self.keystore_path), list(self.keystore_password))
@@ -199,7 +183,6 @@ class BurpExtender(IBurpExtender, IHttpListener, ITab, IExtensionStateListener):
 
     def start_local_listener(self):
         try:
-            # Replaced with native java.net.ServerSocket to remove Jython abstraction locks
             self.server_socket = ServerSocket()
             self.server_socket.setReuseAddress(True)
             self.server_socket.bind(InetSocketAddress('127.0.0.1', self.local_port))
@@ -214,76 +197,65 @@ class BurpExtender(IBurpExtender, IHttpListener, ITab, IExtensionStateListener):
             try:
                 client_sock = self.server_socket.accept()
                 if not self.is_running: break
-                
-                self.ui_log("[*] Connection incoming from client socket address: {}:{}".format(
-                    client_sock.getInetAddress().getHostAddress(), client_sock.getPort()))
-                
-                with self.connections_lock:
-                    self.active_connections.append(client_sock)
+                with self.connections_lock: self.active_connections.append(client_sock)
                 threading.Thread(target=self.handle_client, args=(client_sock,)).start()
-            except Exception:
-                break
+            except Exception: break
 
     def handle_client(self, client_sock):
         server_sock = None
         try:
-            self.ui_log("[*] [THREAD] Processing connection pipeline...")
             server_sock = Socket()
             with self.connections_lock:
                 if not self.is_running: return
                 self.active_connections.append(server_sock)
             
-            self.ui_log("[*] [CONN] Connecting to upstream target server ({}:{})...".format(self.target_host, self.target_port))
             server_sock.connect(InetSocketAddress(self.target_host, self.target_port), 5000)
-            self.ui_log("[+] [CONN] Network link established with Westpac server.")
             
             client_in = client_sock.getInputStream()
             client_out = client_sock.getOutputStream()
             server_in = server_sock.getInputStream()
             server_out = server_sock.getOutputStream()
             
-            # Phase 1: Verify exact input bytes match standard RMI initialization 
-            self.ui_log("[*] [HANDSHAKE] Reading 7-byte JRMI header protocol frame from client...")
+            # Read exactly 7 bytes from client (RMI Client Header is static)
             c2s_init = jarray.zeros(7, 'b')
             c2s_read = 0
             while c2s_read < 7:
                 res = client_in.read(c2s_init, c2s_read, 7 - c2s_read)
-                if res == -1: raise Exception("Client closed connection prematurely during negotiation")
+                if res == -1: raise Exception("Client disconnected during handshake")
                 c2s_read += res
             
-            self.ui_log("[C2S Stream Data] Initialized Header bytes captured.")
+            self.ui_log("[C2S Handshake] Forwarding 7-byte RMI header to server.")
             server_out.write(c2s_init, 0, 7)
             server_out.flush()
             
-            self.ui_log("[*] [HANDSHAKE] Awaiting 7-byte acknowledgement response block from server...")
-            s2c_init = jarray.zeros(7, 'b')
-            s2c_read = 0
-            while s2c_read < 7:
-                res = server_in.read(s2c_init, s2c_read, 7 - s2c_read)
-                if res == -1: raise Exception("Server closed connection prematurely during negotiation")
-                s2c_read += res
-                
-            self.ui_log("[S2C Stream Data] Server acknowledgement token received.")
-            client_out.write(s2c_init, 0, 7)
+            # CRITICAL FIX: Read whatever length the server acknowledges with dynamically
+            self.ui_log("[*] [HANDSHAKE] Awaiting variable response block from server...")
+            s2c_buf = jarray.zeros(1024, 'b')
+            s2c_bytes_read = server_in.read(s2c_buf)
+            if s2c_bytes_read == -1: raise Exception("Server closed channel during handshake negotiation")
+            
+            self.ui_log("[S2C Handshake] Received acknowledgment packet ({} bytes). Forwarding to client.".format(s2c_bytes_read))
+            client_out.write(s2c_buf, 0, s2c_bytes_read)
             client_out.flush()
             
-            # Log initialization handshake record into Burp core database
-            self.log_to_burp(c2s_init, s2c_init, "handshake_initialization")
+            # Extract exactly what was read for Burp history logging
+            logged_s2c = jarray.zeros(s2c_bytes_read, 'b')
+            System = vars(threading)['Thread'] # Quick access tool
+            import java.lang.System
+            java.lang.System.arraycopy(s2c_buf, 0, logged_s2c, 0, s2c_bytes_read)
+            self.log_to_burp(c2s_init, logged_s2c, "handshake_initialization")
             
             # Phase 2: Structural mid-stream socket upgrade to TLS (StartTLS execution)
-            self.ui_log("[*] [TLS] Layering SSL/TLS context wrapper onto client stream...")
+            self.ui_log("[*] [TLS] Upgrading sockets to TLS layer...")
             ssl_client = self.ssl_context.getSocketFactory().createSocket(client_sock, client_sock.getInetAddress().getHostAddress(), client_sock.getPort(), True)
             ssl_client.setUseClientMode(False)
-            self.ui_log("[*] [TLS] Negotiating inbound TLS Handshake sequence against client...")
             ssl_client.startHandshake()
-            self.ui_log("[+] [TLS] Inbound verification: Client cryptographic session verified.")
+            self.ui_log("[+] [TLS] Client cryptographic session verified.")
             
-            self.ui_log("[*] [TLS] Layering SSL/TLS context wrapper onto server stream...")
             ssl_server = self.ssl_context.getSocketFactory().createSocket(server_sock, self.target_host, self.target_port, True)
             ssl_server.setUseClientMode(True)
-            self.ui_log("[*] [TLS] Negotiating outbound TLS Handshake sequence against server...")
             ssl_server.startHandshake()
-            self.ui_log("[+] [TLS] Outbound verification: Server cryptographic session verified.")
+            self.ui_log("[+] [TLS] Server cryptographic session verified.")
             
             self.ui_log("[+] SUCCESS: Handshake sequences synchronized. Tunnels fully active.")
             
@@ -294,15 +266,13 @@ class BurpExtender(IBurpExtender, IHttpListener, ITab, IExtensionStateListener):
             t2.start()
             
         except Exception, e:
-            if self.is_running:
-                self.ui_log("[-] Execution Flow Block Interrupted: {}".format(str(e)))
+            if self.is_running: self.ui_log("[-] Pipeline Broken: {}".format(str(e)))
             self.cleanup_sockets(client_sock, server_sock)
 
     def stream_pipe(self, src, dst, is_c2s, raw_client, raw_server):
         buf = jarray.zeros(4096, 'b')
         direction = "CLIENT -> SERVER" if is_c2s else "SERVER -> CLIENT"
         endpoint_lbl = "rmi_data_c2s" if is_c2s else "rmi_data_s2c"
-        
         try:
             while self.is_running:
                 bytes_read = src.getInputStream().read(buf)
@@ -318,13 +288,10 @@ class BurpExtender(IBurpExtender, IHttpListener, ITab, IExtensionStateListener):
                 
                 self.ui_log("[TRANSMISSION] {} | Intercepted: {} bytes".format(direction, bytes_read))
                 
-                if is_c2s:
-                    self.log_to_burp(data_bytes, None, endpoint_lbl)
-                else:
-                    self.log_to_burp(None, data_bytes, endpoint_lbl)
+                if is_c2s: self.log_to_burp(data_bytes, None, endpoint_lbl)
+                else: self.log_to_burp(None, data_bytes, endpoint_lbl)
         except Exception: pass
-        finally:
-            self.cleanup_sockets(raw_client, raw_server)
+        finally: self.cleanup_sockets(raw_client, raw_server)
 
     def cleanup_sockets(self, s1, s2):
         try: s1.close()
@@ -338,44 +305,27 @@ class BurpExtender(IBurpExtender, IHttpListener, ITab, IExtensionStateListener):
     def log_to_burp(self, request_bytes, response_bytes, endpoint):
         req_body = request_bytes if request_bytes else b""
         res_body = response_bytes if response_bytes else b""
-        
-        http_req = (
-            "POST /{} HTTP/1.1\r\n"
-            "Host: {}\r\n"
-            "Content-Type: application/octet-stream\r\n"
-            "Content-Length: {}\r\n\r\n"
-        ).format(endpoint, self.FAKE_HOST, len(req_body)) + req_body
-        
-        http_res = (
-            "HTTP/1.1 200 OK\r\n"
-            "Server: Murex-RMI-Bridge\r\n"
-            "Content-Type: application/octet-stream\r\n"
-            "Content-Length: {}\r\n\r\n"
-        ).format(len(res_body)) + res_body
-        
+        http_req = ("POST /{} HTTP/1.1\r\nHost: {}\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\n\r\n").format(endpoint, self.FAKE_HOST, len(req_body)) + req_body
+        http_res = ("HTTP/1.1 200 OK\r\nServer: Murex-RMI-Bridge\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\n\r\n").format(len(res_body)) + res_body
         service = CustomHttpService(self.FAKE_HOST, 80, "http")
-        item = CustomHttpRequestResponse(http_req, http_res, service)
-        self._callbacks.addToHistory(item)
+        self._callbacks.addToHistory(CustomHttpRequestResponse(http_req, http_res, service))
 
     def processHttpMessage(self, toolFlag, messageIsRequest, messageInfo):
         if messageInfo.getHttpService().getHost() != self.FAKE_HOST: return
         if messageIsRequest:
             try:
                 request_info = self._helpers.analyzeRequest(messageInfo)
-                req_bytes = messageInfo.getRequest()
                 body_offset = request_info.getBodyOffset()
-                rmi_payload = req_bytes[body_offset:]
+                rmi_payload = messageInfo.getRequest()[body_offset:]
                 
                 backend_sock = Socket()
                 backend_sock.connect(InetSocketAddress(self.target_host, self.target_port), 5000)
                 
-                # Send mock RMI Stream Initiation wrapper
-                jrmi_init = jarray.array([0x4a, 0x52, 0x4d, 0x49, 0x00, 0x01, 0x01], 'b')
-                backend_sock.getOutputStream().write(jrmi_init)
+                backend_sock.getOutputStream().write(jarray.array([0x4a, 0x52, 0x4d, 0x49, 0x00, 0x01, 0x01], 'b'))
                 backend_sock.getOutputStream().flush()
                 
-                srv_ack = jarray.zeros(7, 'b')
-                backend_sock.getInputStream().read(srv_ack)
+                srv_ack = jarray.zeros(1024, 'b')
+                backend_sock.getInputStream().read(srv_ack) # Fixed dynamic replay check
                 
                 ssl_backend = self.ssl_context.getSocketFactory().createSocket(backend_sock, self.target_host, self.target_port, True)
                 ssl_backend.setUseClientMode(True)
@@ -386,7 +336,6 @@ class BurpExtender(IBurpExtender, IHttpListener, ITab, IExtensionStateListener):
                 
                 backend_sock.setSoTimeout(2000)
                 input_stream = ssl_backend.getInputStream()
-                
                 res_out = ByteArrayOutputStream()
                 buf = jarray.zeros(4096, 'b')
                 while True:
@@ -398,14 +347,7 @@ class BurpExtender(IBurpExtender, IHttpListener, ITab, IExtensionStateListener):
                     except Exception: break
                         
                 server_rmi_response = res_out.toByteArray()
-                http_res = (
-                    "HTTP/1.1 200 OK\r\n"
-                    "Server: Murex-RMI-Bridge\r\n"
-                    "Content-Type: application/octet-stream\r\n"
-                    "Content-Length: {}\r\n\r\n"
-                ).format(len(server_rmi_response)) + server_rmi_response
+                http_res = ("HTTP/1.1 200 OK\r\nServer: Murex-RMI-Bridge\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\n\r\n").format(len(server_rmi_response)) + server_rmi_response
                 messageInfo.setResponse(http_res)
             except Exception, e:
-                err_msg = "Error executing RMI Replay loop: {}".format(str(e))
-                http_err = ( "HTTP/1.1 500 Error\r\n\r\n" ) + err_msg
-                messageInfo.setResponse(http_err)
+                messageInfo.setResponse(("HTTP/1.1 500 Error\r\n\r\n") + "Error executing RMI Replay loop: {}".format(str(e)))
