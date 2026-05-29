@@ -2,10 +2,11 @@
 from burp import IBurpExtender, IHttpListener, IHttpRequestResponse, IHttpService, ITab
 import socket
 import threading
+import jarray
 from javax.net.ssl import SSLContext, X509TrustManager, KeyManagerFactory
 from java.io import FileInputStream, ByteArrayOutputStream, File
 from java.security import KeyStore
-from javax.swing import JPanel, JLabel, JTextField, JButton, JFileChooser, JTextArea, JScrollPane, BorderFactory
+from javax.swing import JPanel, JLabel, JTextField, JButton, JFileChooser, JTextArea, JScrollPane, BorderFactory, SwingUtilities
 from java.awt import GridBagLayout, GridBagConstraints, Insets, BorderLayout
 
 class CustomHttpService(IHttpService):
@@ -49,99 +50,72 @@ class BurpExtender(IBurpExtender, IHttpListener, ITab):
         self.ssl_context = None
         self.FAKE_HOST = "murex-rmi-bridge"
         
-        # Build out the GUI elements natively inside Burp
+        # Initialize User Interface
         self.init_ui()
         callbacks.addSuiteTab(self)
-        
-        self.log("[*] murex_rmi_interception UI Extension loaded.")
-        self.log("[*] Configure your target below and click 'Start Interceptor Listener'.")
+        self.ui_log("[*] murex_rmi_interception UI loaded. Ready to initialize listener.")
 
-    # ==================== ITab Interface Implementation ====================
-    def getTabCaption(self):
-        return "Murex RMI Intercept"
-        
-    def getUiComponent(self):
-        return self.main_panel
+    def getTabCaption(self): return "Murex RMI Intercept"
+    def getUiComponent(self): return self.main_panel
 
-    # ==================== GUI Component Construction ====================
     def init_ui(self):
         self.main_panel = JPanel(BorderLayout())
-        
         config_panel = JPanel(GridBagLayout())
         config_panel.setBorder(BorderFactory.createTitledBorder("Interceptor Configurations"))
         gbc = GridBagConstraints()
         gbc.insets = Insets(5, 5, 5, 5)
         gbc.fill = GridBagConstraints.HORIZONTAL
         
-        # Row 0: Local Listen Port
-        gbc.gridx = 0; gbc.gridy = 0
-        config_panel.add(JLabel("Local Listen Port:"), gbc)
+        # UI Input Fields
+        gbc.gridx = 0; gbc.gridy = 0; config_panel.add(JLabel("Local Listen Port:"), gbc)
         self.txt_local_port = JTextField("9101", 10)
-        gbc.gridx = 1; gbc.gridy = 0
-        config_panel.add(self.txt_local_port, gbc)
+        gbc.gridx = 1; gbc.gridy = 0; config_panel.add(self.txt_local_port, gbc)
         
-        # Row 1: Upstream Target Host
-        gbc.gridx = 0; gbc.gridy = 1
-        config_panel.add(JLabel("Upstream Target Host/IP:"), gbc)
-        self.txt_target_host = JTextField("10.10.10.10", 20)
-        gbc.gridx = 1; gbc.gridy = 1
-        config_panel.add(self.txt_target_host, gbc)
+        gbc.gridx = 0; gbc.gridy = 1; config_panel.add(JLabel("Upstream Target Host/IP:"), gbc)
+        self.txt_target_host = JTextField("10.100.113.45", 20)
+        gbc.gridx = 1; gbc.gridy = 1; config_panel.add(self.txt_target_host, gbc)
         
-        # Row 2: Upstream Target Port
-        gbc.gridx = 0; gbc.gridy = 2
-        config_panel.add(JLabel("Upstream Target Port:"), gbc)
+        gbc.gridx = 0; gbc.gridy = 2; config_panel.add(JLabel("Upstream Target Port:"), gbc)
         self.txt_target_port = JTextField("9101", 10)
-        gbc.gridx = 1; gbc.gridy = 2
-        config_panel.add(self.txt_target_port, gbc)
+        gbc.gridx = 1; gbc.gridy = 2; config_panel.add(self.txt_target_port, gbc)
         
-        # Row 3: Burp CA KeyStore Path (.p12)
-        gbc.gridx = 0; gbc.gridy = 3
-        config_panel.add(JLabel("Burp CA Path (.p12):"), gbc)
+        gbc.gridx = 0; gbc.gridy = 3; config_panel.add(JLabel("Burp CA Path (.p12):"), gbc)
         self.txt_keystore_path = JTextField(r"C:\burp\burpca.p12", 30)
-        gbc.gridx = 1; gbc.gridy = 3
-        config_panel.add(self.txt_keystore_path, gbc)
+        gbc.gridx = 1; gbc.gridy = 3; config_panel.add(self.txt_keystore_path, gbc)
         self.btn_browse = JButton("Browse...", actionPerformed=self.btn_browse_clicked)
-        gbc.gridx = 2; gbc.gridy = 3
-        config_panel.add(self.btn_browse, gbc)
+        gbc.gridx = 2; gbc.gridy = 3; config_panel.add(self.btn_browse, gbc)
         
-        # Row 4: KeyStore Password
-        gbc.gridx = 0; gbc.gridy = 4
-        config_panel.add(JLabel("KeyStore Password:"), gbc)
+        gbc.gridx = 0; gbc.gridy = 4; config_panel.add(JLabel("KeyStore Password:"), gbc)
         self.txt_keystore_password = JTextField("changeit", 15)
-        gbc.gridx = 1; gbc.gridy = 4
-        config_panel.add(self.txt_keystore_password, gbc)
+        gbc.gridx = 1; gbc.gridy = 4; config_panel.add(self.txt_keystore_password, gbc)
         
-        # Row 5: Action Button
         self.btn_action = JButton("Start Interceptor Listener", actionPerformed=self.btn_action_clicked)
-        gbc.gridx = 1; gbc.gridy = 5; gbc.gridwidth = 2
-        config_panel.add(self.btn_action, gbc)
+        gbc.gridx = 1; gbc.gridy = 5; gbc.gridwidth = 2; config_panel.add(self.btn_action, gbc)
         
-        # Logs View Pane at Bottom
-        self.txt_logs = JTextArea(12, 50)
+        # Log Window Components
+        self.txt_logs = JTextArea(16, 60)
         self.txt_logs.setEditable(False)
         scroll_logs = JScrollPane(self.txt_logs)
-        scroll_logs.setBorder(BorderFactory.createTitledBorder("Extension Console Logs"))
+        scroll_logs.setBorder(BorderFactory.createTitledBorder("Real-Time Connection Activity Logs"))
         
         self.main_panel.add(config_panel, BorderLayout.NORTH)
         self.main_panel.add(scroll_logs, BorderLayout.CENTER)
 
-    def log(self, message):
-        self.txt_logs.append(message + "\n")
-        print message
+    def ui_log(self, message):
+        # Ensure thread-safe updates to the Java Swing UI container
+        class UpdateLogRunnable(vars(threading)['Thread']):
+            def run(self):
+                self.txt_logs.append(message + "\n")
+                self.txt_logs.setCaretPosition(self.txt_logs.getDocument().getLength())
+        SwingUtilities.invokeLater(UpdateLogRunnable())
 
     def btn_browse_clicked(self, event):
         chooser = JFileChooser()
-        if self.txt_keystore_path.getText():
-            chooser.setCurrentDirectory(File(self.txt_keystore_path.getText()).getParentFile())
         if chooser.showOpenDialog(self.main_panel) == JFileChooser.APPROVE_OPTION:
             self.txt_keystore_path.setText(chooser.getSelectedFile().getAbsolutePath())
 
     def btn_action_clicked(self, event):
-        if self.is_running:
-            self.log("[-] Interceptor proxy is already active. Restart Burp extension to re-bind parameters.")
-            return
-            
-        # Parse configurations dynamically from UI form fields
+        if self.is_running: return
         try:
             self.local_port = int(self.txt_local_port.getText().strip())
             self.target_host = self.txt_target_host.getText().strip()
@@ -149,39 +123,27 @@ class BurpExtender(IBurpExtender, IHttpListener, ITab):
             self.keystore_path = self.txt_keystore_path.getText().strip()
             self.keystore_password = self.txt_keystore_password.getText()
         except ValueError:
-            self.log("[-] Validation Error: Ports must be valid numerical values.")
+            self.ui_log("[-] Input Validation Error: Check port configurations.")
             return
 
-        # Attempt to dynamically build the SSL Context via UI variables
-        if not self.init_ssl():
-            return
-            
-        # Spin up background thread to monitor the proxy socket
+        if not self.init_ssl(): return
+        
         self.is_running = True
         self.btn_action.setEnabled(False)
-        self.txt_local_port.setEditable(False)
-        self.txt_target_host.setEditable(False)
-        self.txt_target_port.setEditable(False)
-        self.txt_keystore_path.setEditable(False)
-        self.btn_browse.setEnabled(False)
-        self.txt_keystore_password.setEditable(False)
-        
         threading.Thread(target=self.start_local_listener).start()
 
-    # ==================== Network Core Cryptography Engine ====================
     def init_ssl(self):
         try:
             ks = KeyStore.getInstance("PKCS12")
             ks.load(FileInputStream(self.keystore_path), list(self.keystore_password))
             kmf = KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm())
             kmf.init(ks, list(self.keystore_password))
-            
             self.ssl_context = SSLContext.getInstance("TLS")
             self.ssl_context.init(kmf.getKeyManagers(), [TrustAllManager()], None)
-            self.log("[+] Secure SSL Engine built from target KeyStore.")
+            self.ui_log("[+] SSL decryption layer built from selected Keystore.")
             return True
         except Exception, e:
-            self.log("[-] Cryptographic Init Failed: {}".format(str(e)))
+            self.ui_log("[-] Cryptographic Startup Error: {}".format(str(e)))
             return False
 
     def start_local_listener(self):
@@ -190,70 +152,87 @@ class BurpExtender(IBurpExtender, IHttpListener, ITab):
             server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             server.bind(('127.0.0.1', self.local_port))
             server.listen(15)
-            self.log("[+] Active Pipeline Listening on 127.0.0.1:{}".format(self.local_port))
+            self.ui_log("[+] Core proxy engine actively listening on 127.0.0.1:{}...".format(self.local_port))
         except Exception, e:
-            self.log("[-] Socket Bind Exception: {}".format(str(e)))
+            self.ui_log("[-] Port Bind Failure: {}".format(str(e)))
             self.is_running = False
             return
         
         while True:
-            try:
-                client_sock, addr = server.accept()
-                threading.Thread(target=self.handle_client, args=(client_sock,)).start()
-            except Exception:
-                break
+            client_sock, addr = server.accept()
+            self.ui_log("[*] Incoming client connection accepted from: {}:{}".format(addr[0], addr[1]))
+            threading.Thread(target=self.handle_client, args=(client_sock,)).start()
 
     def handle_client(self, client_sock):
         try:
+            self.ui_log("[*] Establishing link to upstream target server at {}:{}...".format(self.target_host, self.target_port))
             server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             server_sock.connect((self.target_host, self.target_port))
             
-            # Phase 1: Handle baseline plain text JRMI protocol negotiation exchange
+            # Phase 1: Exchange baseline plain-text 7-byte JRMI handshakes
+            self.ui_log("[*] Intercepting plain-text JRMI handshake header...")
             c2s_init = client_sock.recv(7)
+            self.ui_log("[C2S] Plain Handshake Header: '{}'".format(c2s_init.encode('string_escape')))
             server_sock.sendall(c2s_init)
             
             s2c_init = server_sock.recv(7)
+            self.ui_log("[S2C] Server Handshake Reply: '{}'".format(s2c_init.encode('string_escape')))
             client_sock.sendall(s2c_init)
             
             self.log_to_burp(c2s_init, s2c_init, "handshake_initialization")
             
-            # Phase 2: Structural mid-stream socket upgrade to TLS (StartTLS execution layer)
+            # Phase 2: Dynamic Sockets upgrade to SSL/TLS mid-stream (StartTLS Execution)
+            self.ui_log("[*] Initiating mid-stream cryptographic upgrade (StartTLS encapsulation)...")
             ssl_client = self.ssl_context.getSocketFactory().createSocket(client_sock, client_sock.getInetAddress().getHostAddress(), client_sock.getPort(), True)
             ssl_client.setUseClientMode(False)
             ssl_client.startHandshake()
+            self.ui_log("[+] Client TLS Handshake completed successfully.")
             
             ssl_server = self.ssl_context.getSocketFactory().createSocket(server_sock, self.target_host, self.target_port, True)
             ssl_server.setUseClientMode(True)
             ssl_server.startHandshake()
+            self.ui_log("[+] Upstream Server TLS Handshake completed successfully.")
             
-            # Phase 3: Spin operational streaming loops
+            # Phase 3: Launch streaming pipelines using native Java byte arrays to eliminate blocking
+            self.ui_log("[+] Sockets upgraded. Initializing real-time data streaming loops.")
             t1 = threading.Thread(target=self.stream_pipe, args=(ssl_client, ssl_server, True))
             t2 = threading.Thread(target=self.stream_pipe, args=(ssl_server, ssl_client, False))
             t1.start()
             t2.start()
             
         except Exception, e:
-            pass
+            self.ui_log("[-] Connection pipeline tracking broken: {}".format(str(e)))
 
     def stream_pipe(self, src, dst, is_c2s):
-        buffer_size = 4096
+        # Using a native Java byte array prevents Jython from blocking indefinitely on read()
+        buf = jarray.zeros(4096, 'b')
+        direction = "C2S" if is_c2s else "S2C"
         try:
             while True:
-                data = src.getInputStream().read(buffer_size)
-                if data == -1 or data == 0: break
+                bytes_read = src.getInputStream().read(buf)
+                if bytes_read == -1:
+                    self.ui_log("[*] Connection stream closed by remote endpoint ({}).".format(direction))
+                    break
+                if bytes_read == 0:
+                    continue
                 
+                # Extract the exact slice of data read from the buffer
                 out = ByteArrayOutputStream()
-                out.write(data, 0, len(data))
+                out.write(buf, 0, bytes_read)
                 data_bytes = out.toByteArray()
                 
-                dst.getOutputStream().write(data_bytes)
+                # Forward data to destination
+                dst.getOutputStream().write(buf, 0, bytes_read)
                 dst.getOutputStream().flush()
+                
+                self.ui_log("[Data Transfer] {} -> Forwarded {} bytes".format(direction, bytes_read))
                 
                 if is_c2s:
                     self.log_to_burp(data_bytes, None, "rmi_data_c2s")
                 else:
                     self.log_to_burp(None, data_bytes, "rmi_data_s2c")
-        except Exception: pass
+        except Exception, e:
+            self.ui_log("[-] Active stream pipe exception ({}): {}".format(direction, str(e)))
         finally:
             try: src.close()
             except: pass
@@ -283,9 +262,7 @@ class BurpExtender(IBurpExtender, IHttpListener, ITab):
         self._callbacks.addToHistory(item)
 
     def processHttpMessage(self, toolFlag, messageIsRequest, messageInfo):
-        if messageInfo.getHttpService().getHost() != self.FAKE_HOST:
-            return
-            
+        if messageInfo.getHttpService().getHost() != self.FAKE_HOST: return
         if messageIsRequest:
             try:
                 request_info = self._helpers.analyzeRequest(messageInfo)
@@ -319,21 +296,14 @@ class BurpExtender(IBurpExtender, IHttpListener, ITab):
                     except Exception: break
                         
                 server_rmi_response = res_out.toByteArray()
-                
                 http_res = (
                     "HTTP/1.1 200 OK\r\n"
                     "Server: Murex-RMI-Bridge\r\n"
                     "Content-Type: application/octet-stream\r\n"
                     "Content-Length: {}\r\n\r\n"
                 ).format(len(server_rmi_response)) + server_rmi_response
-                
                 messageInfo.setResponse(http_res)
-                
             except Exception, e:
                 err_msg = "Error executing RMI Replay loop: {}".format(str(e))
-                http_err = (
-                    "HTTP/1.1 500 Internal Server Error\r\n"
-                    "Content-Type: text/plain\r\n"
-                    "Content-Length: {}\r\n\r\n"
-                ).format(len(err_msg)) + err_msg
+                http_err = ( "HTTP/1.1 500 Error\r\n\r\n" ) + err_msg
                 messageInfo.setResponse(http_err)
