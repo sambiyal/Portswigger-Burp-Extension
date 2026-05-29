@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-from burp import IBurpExtender, IHttpListener, IHttpRequestResponse, IHttpService, ITab
+from burp import IBurpExtender, IHttpListener, IHttpRequestResponse, IHttpService, ITab, IExtensionStateListener
 import socket
 import threading
 import sys
@@ -40,13 +40,17 @@ class TrustAllManager(X509TrustManager):
     def checkClientTrusted(self, chain, authType): pass
     def checkServerTrusted(self, chain, authType): pass
 
-class BurpExtender(IBurpExtender, IHttpListener, ITab):
+class BurpExtender(IBurpExtender, IHttpListener, ITab, IExtensionStateListener):
     def registerExtenderCallbacks(self, callbacks):
         self._callbacks = callbacks
         self._helpers = callbacks.getHelpers()
         callbacks.setExtensionName("murex_rmi_interception")
         callbacks.registerHttpListener(self)
         
+        # Register the state listener to handle clean unloads/reloads
+        callbacks.registerExtensionStateListener(self)
+        
+        # Ensure default state is completely stopped on initial load
         self.is_running = False
         self.ssl_context = None
         self.server_socket = None
@@ -57,12 +61,16 @@ class BurpExtender(IBurpExtender, IHttpListener, ITab):
         self.init_ui()
         callbacks.addSuiteTab(self)
         
-        self.ui_log("[*] ========================================================")
-        self.ui_log("[*] MUREX RMI INTERCEPTION ENGINE READY (WITH STOP TOGGLE)")
-        self.ui_log("[*] ========================================================")
+        self.ui_log("[*] Extension Loaded in DORMANT state. Sockets are unbound.")
+        self.ui_log("[*] Click 'Start Interceptor Listener' below to initiate the proxy pipeline.")
 
     def getTabCaption(self): return "Murex RMI Intercept"
     def getUiComponent(self): return self.main_panel
+
+    def extensionUnloaded(self):
+        """Burp API override: Triggers instantly if the user removes or reloads the extension"""
+        print("[*] Extension unload event detected. Cleaning up socket space...")
+        self.stop_interceptor()
 
     def init_ui(self):
         self.main_panel = JPanel(BorderLayout())
@@ -72,7 +80,6 @@ class BurpExtender(IBurpExtender, IHttpListener, ITab):
         gbc.insets = Insets(5, 5, 5, 5)
         gbc.fill = GridBagConstraints.HORIZONTAL
         
-        # Configurations Layout Inputs
         gbc.gridx = 0; gbc.gridy = 0; config_panel.add(JLabel("Local Listen Port:"), gbc)
         self.txt_local_port = JTextField("9101", 10)
         gbc.gridx = 1; gbc.gridy = 0; config_panel.add(self.txt_local_port, gbc)
@@ -95,7 +102,6 @@ class BurpExtender(IBurpExtender, IHttpListener, ITab):
         self.txt_keystore_password = JTextField("changeit", 15)
         gbc.gridx = 1; gbc.gridy = 4; config_panel.add(self.txt_keystore_password, gbc)
         
-        # Dynamic Start/Stop Master Button
         self.btn_action = JButton("Start Interceptor Listener", actionPerformed=self.btn_action_clicked)
         gbc.gridx = 1; gbc.gridy = 5; gbc.gridwidth = 2; config_panel.add(self.btn_action, gbc)
         
@@ -124,14 +130,12 @@ class BurpExtender(IBurpExtender, IHttpListener, ITab):
 
     def btn_action_clicked(self, event):
         if self.is_running:
-            # PIVOT OPERATION: If running, execute stop sequence
             self.stop_interceptor()
         else:
-            # BASELINE OPERATION: If stopped, execute start sequence
             self.start_interceptor()
 
     def start_interceptor(self):
-        self.ui_log("[*] Initializing proxy listener layers...")
+        self.ui_log("[*] Booting pipeline components dynamically...")
         try:
             self.local_port = int(self.txt_local_port.getText().strip())
             self.target_host = self.txt_target_host.getText().strip()
@@ -139,7 +143,7 @@ class BurpExtender(IBurpExtender, IHttpListener, ITab):
             self.keystore_path = self.txt_keystore_path.getText().strip()
             self.keystore_password = self.txt_keystore_password.getText()
         except ValueError:
-            self.ui_log("[-] Validation Error: Verify input values are correct numbers.")
+            self.ui_log("[-] Input Exception: Port entries must be integers.")
             return
 
         if not self.init_ssl(): return
@@ -148,31 +152,35 @@ class BurpExtender(IBurpExtender, IHttpListener, ITab):
         self.btn_action.setText("STOP Interceptor Listener")
         self.toggle_ui_fields(False)
         
+        # Thread handles runtime execution ONLY after this explicit button action event
         threading.Thread(target=self.start_local_listener).start()
 
     def stop_interceptor(self):
-        self.ui_log("[*] Executing forceful shutdown routine...")
+        if not self.is_running and not self.server_socket:
+            return
+            
+        self.ui_log("[*] Stopping proxy and freeing bound ports...")
         self.is_running = False
         
-        # 1. Kill the core listening socket to release the port interface
         if self.server_socket:
             try:
                 self.server_socket.close()
-                self.ui_log("[+] Core server socket closed cleanly.")
+                self.ui_log("[+] Main listening socket closed.")
             except Exception, e:
-                self.ui_log("[-] Exception closing listener socket: {}".format(str(e)))
+                self.ui_log("[-] Error closing listener: {}".format(str(e)))
+            self.server_socket = None
         
-        # 2. Iterate and terminate all existing live client/server connection tunnels
         with self.connections_lock:
-            self.ui_log("[*] Sniping {} active connection tunnels...".format(len(self.active_connections)))
-            for sock in self.active_connections:
-                try: sock.close()
-                except: pass
-            del self.active_connections[:]
+            if self.active_connections:
+                self.ui_log("[*] Terminating {} running stream tunnels...".format(len(self.active_connections)))
+                for sock in self.active_connections:
+                    try: sock.close()
+                    except: pass
+                del self.active_connections[:]
         
         self.btn_action.setText("Start Interceptor Listener")
         self.toggle_ui_fields(True)
-        self.ui_log("[+] INTERCEPTOR DISENGAGED. Port {} is now clear.".format(self.local_port))
+        self.ui_log("[+] Status: Stopped and dormant.")
 
     def toggle_ui_fields(self, editable_state):
         self.txt_local_port.setEditable(editable_state)
@@ -184,7 +192,7 @@ class BurpExtender(IBurpExtender, IHttpListener, ITab):
 
     def init_ssl(self):
         if not File(self.keystore_path).exists():
-            self.ui_log("[-] Critical Error: Specified KeyStore file target missing.")
+            self.ui_log("[-] Critical Error: KeyStore file path is invalid.")
             return False
         try:
             ks = KeyStore.getInstance("PKCS12")
@@ -195,7 +203,7 @@ class BurpExtender(IBurpExtender, IHttpListener, ITab):
             self.ssl_context.init(kmf.getKeyManagers(), [TrustAllManager()], None)
             return True
         except Exception, e:
-            self.ui_log("[-] Cryptographic Extraction Error: {}".format(str(e)))
+            self.ui_log("[-] SSL initialization defect: {}".format(str(e)))
             return False
 
     def start_local_listener(self):
@@ -204,10 +212,10 @@ class BurpExtender(IBurpExtender, IHttpListener, ITab):
             self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             self.server_socket.bind(('127.0.0.1', self.local_port))
             self.server_socket.listen(15)
-            self.ui_log("[+] Active proxy pipeline listening on 127.0.0.1:{}.".format(self.local_port))
+            self.ui_log("[+] SUCCESS: Interceptor proxy now listening on 127.0.0.1:{}.".format(self.local_port))
         except Exception, e:
             if self.is_running:
-                self.ui_log("[-] Structural Bind Exception: {}".format(str(e)))
+                self.ui_log("[-] Bind Failure: Port {} might be in use. Clean up other extensions.".format(self.local_port))
                 self.stop_interceptor()
             return
         
@@ -216,14 +224,12 @@ class BurpExtender(IBurpExtender, IHttpListener, ITab):
                 client_sock, addr = self.server_socket.accept()
                 if not self.is_running: break
                 
-                self.ui_log("[*] Connection accepted from: {}:{}".format(addr[0], addr[1]))
-                
+                self.ui_log("[*] Connection incoming from client: {}:{}".format(addr[0], addr[1]))
                 with self.connections_lock:
                     self.active_connections.append(client_sock)
-                    
                 threading.Thread(target=self.handle_client, args=(client_sock,)).start()
             except Exception:
-                break # Catches loop exit when server_socket is closed via stop_interceptor
+                break
 
     def handle_client(self, client_sock):
         server_sock = None
@@ -235,7 +241,6 @@ class BurpExtender(IBurpExtender, IHttpListener, ITab):
                 
             server_sock.connect((self.target_host, self.target_port))
             
-            # Phase 1: JRMI Handshaking
             c2s_init = client_sock.recv(7)
             if not c2s_init or not self.is_running: return
             server_sock.sendall(c2s_init)
@@ -246,7 +251,6 @@ class BurpExtender(IBurpExtender, IHttpListener, ITab):
             
             self.log_to_burp(c2s_init, s2c_init, "handshake_initialization")
             
-            # Phase 2: StartTLS Injection Escalation
             ssl_client = self.ssl_context.getSocketFactory().createSocket(client_sock, client_sock.getInetAddress().getHostAddress(), client_sock.getPort(), True)
             ssl_client.setUseClientMode(False)
             ssl_client.startHandshake()
@@ -257,7 +261,6 @@ class BurpExtender(IBurpExtender, IHttpListener, ITab):
             
             self.ui_log("[+] Handshakes synchronized. Duplex tunnels active.")
             
-            # Phase 3: Active Duplex Pipes
             t1 = threading.Thread(target=self.stream_pipe, args=(ssl_client, ssl_server, True, client_sock, server_sock))
             t2 = threading.Thread(target=self.stream_pipe, args=(ssl_server, ssl_client, False, client_sock, server_sock))
             t1.start()
@@ -265,7 +268,7 @@ class BurpExtender(IBurpExtender, IHttpListener, ITab):
             
         except Exception, e:
             if self.is_running:
-                self.ui_log("[-] Connection initialization aborted: {}".format(str(e)))
+                self.ui_log("[-] Connection tunnel dropped: {}".format(str(e)))
             self.cleanup_sockets(client_sock, server_sock)
 
     def stream_pipe(self, src, dst, is_c2s, raw_client, raw_server):
