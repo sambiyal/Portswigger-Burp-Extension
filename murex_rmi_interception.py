@@ -6,11 +6,9 @@ import jarray
 import datetime
 import java.awt
 from java.net import ServerSocket, Socket, InetSocketAddress
-from javax.net.ssl import SSLContext, X509TrustManager, KeyManagerFactory
-from java.io import FileInputStream, ByteArrayOutputStream, File, PushbackInputStream
-from java.security import KeyStore
+from java.io import ByteArrayOutputStream
 from java.lang import String as JString
-from javax.swing import JPanel, JLabel, JTextField, JButton, JFileChooser, JTextArea, JScrollPane, BorderFactory, SwingUtilities, JTabbedPane, JTable, JSplitPane
+from javax.swing import JPanel, JLabel, JTextField, JButton, JTextArea, JScrollPane, BorderFactory, SwingUtilities, JTabbedPane, JTable, JSplitPane
 from javax.swing.table import DefaultTableModel
 from javax.swing.event import ListSelectionListener
 from java.awt import GridBagLayout, GridBagConstraints, Insets, BorderLayout
@@ -35,15 +33,10 @@ class CustomHttpRequestResponse(IHttpRequestResponse):
     def setResponse(self, response): self._response = response
     def getHttpService(self): return self._httpService
     def setHttpService(self, httpService): self._httpService = httpService
-    def getComment(self): return "Decrypted RMI Payload"
+    def getComment(self): return "Raw TCP Packet Stream"
     def setComment(self, comment): pass
-    def getHighlight(self): return "cyan"
+    def getHighlight(self): return "gray"
     def setHighlight(self, highlight): pass
-
-class TrustAllManager(X509TrustManager):
-    def getAcceptedIssuers(self): return None
-    def checkClientTrusted(self, chain, authType): pass
-    def checkServerTrusted(self, chain, authType): pass
 
 class TableSelectionHandler(ListSelectionListener):
     def __init__(self, extender):
@@ -68,7 +61,6 @@ class BurpExtender(IBurpExtender, IHttpListener, ITab, IExtensionStateListener):
         callbacks.registerExtensionStateListener(self)
         
         self.is_running = False
-        self.ssl_context = None
         self.server_socket = None
         self.active_connections = []
         self.connections_lock = threading.Lock()
@@ -76,11 +68,11 @@ class BurpExtender(IBurpExtender, IHttpListener, ITab, IExtensionStateListener):
         self.packet_payloads = []
         self.data_lock = threading.Lock()
         self.packet_counter = 0
-        self.FAKE_HOST = "murex-rmi-bridge"
+        self.FAKE_HOST = "murex-raw-bridge"
         
         self.init_ui()
         callbacks.addSuiteTab(self)
-        self.ui_log("[*] Adaptive Multi-Protocol Interceptor loaded.")
+        self.ui_log("[*] Debug Baseline Pipe Loaded. SSL/TLS Decryption is completely disabled.")
 
     def getTabCaption(self): return "Murex RMI Intercept"
     def getUiComponent(self): return self.main_panel
@@ -95,7 +87,7 @@ class BurpExtender(IBurpExtender, IHttpListener, ITab, IExtensionStateListener):
         # Panel 1: Controls
         tab_control = JPanel(BorderLayout())
         config_panel = JPanel(GridBagLayout())
-        config_panel.setBorder(BorderFactory.createTitledBorder("Universal Pipeline Routing Settings"))
+        config_panel.setBorder(BorderFactory.createTitledBorder("Raw TCP Pass-Through Routing Settings"))
         gbc = GridBagConstraints()
         gbc.insets = Insets(5, 5, 5, 5)
         gbc.fill = GridBagConstraints.HORIZONTAL
@@ -108,18 +100,8 @@ class BurpExtender(IBurpExtender, IHttpListener, ITab, IExtensionStateListener):
         self.txt_target_host = JTextField("10.100.113.45", 20)
         gbc.gridx = 1; gbc.gridy = 1; config_panel.add(self.txt_target_host, gbc)
         
-        gbc.gridx = 0; gbc.gridy = 2; config_panel.add(JLabel("Burp CA Path (.p12):"), gbc)
-        self.txt_keystore_path = JTextField(r"C:\BurpTesting\burpca.p12", 30)
-        gbc.gridx = 1; gbc.gridy = 2; config_panel.add(self.txt_keystore_path, gbc)
-        self.btn_browse = JButton("Browse...", actionPerformed=self.btn_browse_clicked)
-        gbc.gridx = 2; gbc.gridy = 2; config_panel.add(self.btn_browse, gbc)
-        
-        gbc.gridx = 0; gbc.gridy = 3; config_panel.add(JLabel("KeyStore Password:"), gbc)
-        self.txt_keystore_password = JTextField("changeit", 15)
-        gbc.gridx = 1; gbc.gridy = 3; config_panel.add(self.txt_keystore_password, gbc)
-        
         self.btn_action = JButton("Start Interceptor Listener", actionPerformed=self.btn_action_clicked)
-        gbc.gridx = 1; gbc.gridy = 4; gbc.gridwidth = 2; config_panel.add(self.btn_action, gbc)
+        gbc.gridx = 1; gbc.gridy = 2; gbc.gridwidth = 2; config_panel.add(self.btn_action, gbc)
         
         self.txt_logs = JTextArea(18, 70)
         self.txt_logs.setEditable(False)
@@ -131,7 +113,7 @@ class BurpExtender(IBurpExtender, IHttpListener, ITab, IExtensionStateListener):
         
         # Panel 2: Live Packets
         tab_inspector = JPanel(BorderLayout())
-        self.table_model = DefaultTableModel(["ID", "Network Context Route", "Size (Bytes)", "Summary Payload Preview"], 0)
+        self.table_model = DefaultTableModel(["ID", "Network Context Route", "Size (Bytes)", "Raw Hex/ASCII Preview (Encrypted)"], 0)
         self.packet_table = JTable(self.table_model)
         self.packet_table.getSelectionModel().addListSelectionListener(TableSelectionHandler(self))
         scroll_table = JScrollPane(self.packet_table)
@@ -186,19 +168,19 @@ class BurpExtender(IBurpExtender, IHttpListener, ITab, IExtensionStateListener):
             display_str = j_str.substring(0, 120) + "..." if j_str.length() > 120 else j_str
             clean_chars = [chr(display_str.charAt(i)) if 32 <= display_str.charAt(i) <= 126 else "." for i in range(display_str.length())]
             preview_string = "".join(clean_chars)
-        except Exception, e:
-            preview_string = "[Payload Parsing Issue: {}]".format(str(e))
+        except Exception:
+            preview_string = "[Raw Byte Buffer Block]"
             
         dump_view = self.generate_hex_dump(raw_bytes)
         detailed_breakdown = (
             "============================================================\n"
-            " TRANSACTION PAYLOAD INSPECTION VISUALIZER                  \n"
+            " RAW TCP TRANSPARENT PASS-THROUGH VISUALIZER                \n"
             "============================================================\n"
             "Packet Ledger ID:  {}\n"
             "Event Timestamp:   {}\n"
             "Routing Context:   {}\n"
             "Payload Size:      {} Bytes\n\n"
-            "------------------- CLEAR-STREAM RAW DATA -------------------\n"
+            "--------------- RAW STREAM BUFFER (ENCRYPTED) ---------------\n"
             "{}"
         ).format(self.packet_counter, timestamp, direction, byte_count, dump_view)
         
@@ -217,11 +199,6 @@ class BurpExtender(IBurpExtender, IHttpListener, ITab, IExtensionStateListener):
         worker.preview = preview_string
         SwingUtilities.invokeLater(worker)
 
-    def btn_browse_clicked(self, event):
-        chooser = JFileChooser()
-        if chooser.showOpenDialog(self.main_panel) == JFileChooser.APPROVE_OPTION:
-            self.txt_keystore_path.setText(chooser.getSelectedFile().getAbsolutePath())
-
     def btn_clear_table_clicked(self, event):
         self.table_model.setRowCount(0)
         self.packet_counter = 0
@@ -236,21 +213,8 @@ class BurpExtender(IBurpExtender, IHttpListener, ITab, IExtensionStateListener):
         try:
             self.local_port = int(self.txt_local_port.getText().strip())
             self.target_host = self.txt_target_host.getText().strip()
-            self.keystore_path = self.txt_keystore_path.getText().strip()
-            self.keystore_password = self.txt_keystore_password.getText()
         except Exception:
             self.ui_log("[-] Input Exception: Check configurations.")
-            return
-
-        try:
-            ks = KeyStore.getInstance("PKCS12")
-            ks.load(FileInputStream(self.keystore_path), list(self.keystore_password))
-            kmf = KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm())
-            kmf.init(ks, list(self.keystore_password))
-            self.ssl_context = SSLContext.getInstance("TLS")
-            self.ssl_context.init(kmf.getKeyManagers(), [TrustAllManager()], None)
-        except Exception, e:
-            self.ui_log("[-] Cryptographic Setup Failure: {}".format(str(e)))
             return
 
         try:
@@ -263,7 +227,7 @@ class BurpExtender(IBurpExtender, IHttpListener, ITab, IExtensionStateListener):
             t = threading.Thread(target=self.listen_loop)
             t.daemon = True
             t.start()
-            self.ui_log("[+] Active listener bound to local port {}.".format(self.local_port))
+            self.ui_log("[+] Active blind pass-through pipe listening on port {}.".format(self.local_port))
         except Exception, e:
             self.ui_log("[-] Bind Failure: {}".format(str(e)))
 
@@ -287,85 +251,49 @@ class BurpExtender(IBurpExtender, IHttpListener, ITab, IExtensionStateListener):
                 except: pass
             del self.active_connections[:]
         self.btn_action.setText("Start Interceptor Listener")
-        self.ui_log("[+] Listener stopped.")
+        self.ui_log("[+] Baseline pipe stopped.")
 
     def handle_client(self, client_sock):
         server_sock = None
         try:
+            # Open direct upstream connection to the server on the exact same port context
             server_sock = Socket()
             with self.connections_lock: self.active_connections.append(server_sock)
             server_sock.connect(InetSocketAddress(self.target_host, self.local_port), 5000)
+            self.ui_log("[+] Socket connected to server. Shuttling raw bytes...")
             
-            # Use PushbackInputStream to peek at the protocol type dynamically
-            client_in = PushbackInputStream(client_sock.getInputStream(), 7)
+            client_in = client_sock.getInputStream()
+            client_out = client_sock.getOutputStream()
             server_in = server_sock.getInputStream()
             server_out = server_sock.getOutputStream()
             
-            peek_buf = jarray.zeros(3, 'b')
-            bytes_peeked = client_in.read(peek_buf, 0, 3)
-            
-            is_implicit_tls = False
-            if bytes_peeked == 3:
-                # 0x16 0x03 0x01 / 0x02 / 0x03 indicates an immediate TLS handshake record
-                if peek_buf[0] == 0x16 and peek_buf[1] == 0x03:
-                    is_implicit_tls = True
-                client_in.unread(peek_buf, 0, bytes_peeked) # Push bytes back to the stream
-            
-            if not is_implicit_tls:
-                self.ui_log("[*] Plain text StartTLS handshake detected. Processing JRMI headers...")
-                c2s_init = jarray.zeros(7, 'b')
-                c2s_read = 0
-                while c2s_read < 7:
-                    res = client_in.read(c2s_init, c2s_read, 7 - c2s_read)
-                    if res == -1: raise Exception("Client closed connection prematurely")
-                    c2s_read += res
-                
-                self.ui_log_packet("HANDSHAKE (CLIENT -> SERVER)", 7, c2s_init)
-                server_out.write(c2s_init, 0, 7)
-                server_out.flush()
-            else:
-                self.ui_log("[*] Pure Implicit TLS detected. Skipping plain text phase.")
-            
-            # Upgrade both sockets to TLS simultaneously
-            ssl_client = self.ssl_context.getSocketFactory().createSocket(client_sock, client_in, True)
-            ssl_client.setUseClientMode(False)
-            ssl_server = self.ssl_context.getSocketFactory().createSocket(server_sock, server_in, True)
-            ssl_server.setUseClientMode(True)
-            
-            t_client = threading.Thread(target=ssl_client.startHandshake)
-            t_server = threading.Thread(target=ssl_server.startHandshake)
-            t_client.start()
-            t_server.start()
-            
-            t_client.join(timeout=5)
-            t_server.join(timeout=5)
-            self.ui_log("[+] TLS session handshakes successfully established.")
-            
-            t1 = threading.Thread(target=self.stream_pipe, args=(ssl_client, ssl_server, True, client_sock, server_sock))
-            t2 = threading.Thread(target=self.stream_pipe, args=(ssl_server, ssl_client, False, client_sock, server_sock))
+            # Spin raw, immediate duplex streaming tunnels without handling handshakes or data parsing
+            t1 = threading.Thread(target=self.stream_pipe, args=(client_in, server_out, "CLIENT -> SERVER", client_sock, server_sock, True))
+            t2 = threading.Thread(target=self.stream_pipe, args=(server_in, client_out, "SERVER -> CLIENT", client_sock, server_sock, False))
             t1.start()
             t2.start()
             
         except Exception, e:
-            self.ui_log("[-] Session aborted mid-stream: {}".format(str(e)))
+            self.ui_log("[-] Connection mapping broken: {}".format(str(e)))
             self.cleanup_sockets(client_sock, server_sock)
 
-    def stream_pipe(self, src, dst, is_c2s, raw_client, raw_server):
+    def stream_pipe(self, src_in, dst_out, direction, raw_client, raw_server, is_c2s):
         buf = jarray.zeros(4096, 'b')
-        direction = "CLIENT -> SERVER" if is_c2s else "SERVER -> CLIENT"
-        endpoint_lbl = "rmi_data_c2s" if is_c2s else "rmi_data_s2c"
+        endpoint_lbl = "raw_c2s" if is_c2s else "raw_s2c"
         try:
             while self.is_running:
-                bytes_read = src.getInputStream().read(buf)
+                bytes_read = src_in.read(buf)
                 if bytes_read == -1 or not self.is_running: break
                 if bytes_read == 0: continue
                 
+                # Forward raw byte array slice immediately without reading or modifying contents
+                dst_out.write(buf, 0, bytes_read)
+                dst_out.flush()
+                
+                # Extract copy for logging
                 out = ByteArrayOutputStream()
                 out.write(buf, 0, bytes_read)
                 data_bytes = out.toByteArray()
-                
-                dst.getOutputStream().write(data_bytes)
-                dst.getOutputStream().flush()
                 
                 self.ui_log_packet(direction, len(data_bytes), data_bytes)
                 self.log_to_burp(data_bytes if is_c2s else None, data_bytes if not is_c2s else None, endpoint_lbl)
@@ -382,7 +310,7 @@ class BurpExtender(IBurpExtender, IHttpListener, ITab, IExtensionStateListener):
         req_body = request_bytes if request_bytes else b""
         res_body = response_bytes if response_bytes else b""
         http_req = ("POST /{} HTTP/1.1\r\nHost: {}\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\n\r\n").format(endpoint, self.FAKE_HOST, len(req_body)) + req_body
-        http_res = ("HTTP/1.1 200 OK\r\nServer: Murex-RMI-Bridge\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\n\r\n").format(len(res_body)) + res_body
+        http_res = ("HTTP/1.1 200 OK\r\nServer: Murex-Raw-Bridge\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\n\r\n").format(len(res_body)) + res_body
         service = CustomHttpService(self.FAKE_HOST, 80, "http")
         self._callbacks.addToHistory(CustomHttpRequestResponse(http_req, http_res, service))
 
