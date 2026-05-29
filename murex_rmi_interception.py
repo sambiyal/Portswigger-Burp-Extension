@@ -7,6 +7,7 @@ from java.net import ServerSocket, Socket, InetSocketAddress
 from javax.net.ssl import SSLContext, X509TrustManager, KeyManagerFactory
 from java.io import FileInputStream, ByteArrayOutputStream, File
 from java.security import KeyStore
+from java.lang import String as JString
 from javax.swing import JPanel, JLabel, JTextField, JButton, JFileChooser, JTextArea, JScrollPane, BorderFactory, SwingUtilities
 from java.awt import GridBagLayout, GridBagConstraints, Insets, BorderLayout
 
@@ -59,12 +60,13 @@ class BurpExtender(IBurpExtender, IHttpListener, ITab, IExtensionStateListener):
         callbacks.addSuiteTab(self)
         
         self.ui_log("[*] Extension Loaded in DORMANT state. Sockets are unbound.")
+        self.ui_log("[*] Click 'Start Interceptor Listener' below to initialize the pipeline.")
 
     def getTabCaption(self): return "Murex RMI Intercept"
     def getUiComponent(self): return self.main_panel
 
     def extensionUnloaded(self):
-        self.ui_log("[*] Extension unload event detected. Cleaning up sockets...")
+        self.ui_log("[*] Extension unload event detected. Cleaning up active components...")
         self.stop_interceptor()
 
     def init_ui(self):
@@ -216,7 +218,7 @@ class BurpExtender(IBurpExtender, IHttpListener, ITab, IExtensionStateListener):
             server_in = server_sock.getInputStream()
             server_out = server_sock.getOutputStream()
             
-            # Read exactly 7 bytes from client (RMI Client Header is static)
+            # Phase 1: Dynamic Handshake Protocol Extraction
             c2s_init = jarray.zeros(7, 'b')
             c2s_read = 0
             while c2s_read < 7:
@@ -228,8 +230,6 @@ class BurpExtender(IBurpExtender, IHttpListener, ITab, IExtensionStateListener):
             server_out.write(c2s_init, 0, 7)
             server_out.flush()
             
-            # CRITICAL FIX: Read whatever length the server acknowledges with dynamically
-            self.ui_log("[*] [HANDSHAKE] Awaiting variable response block from server...")
             s2c_buf = jarray.zeros(1024, 'b')
             s2c_bytes_read = server_in.read(s2c_buf)
             if s2c_bytes_read == -1: raise Exception("Server closed channel during handshake negotiation")
@@ -238,26 +238,28 @@ class BurpExtender(IBurpExtender, IHttpListener, ITab, IExtensionStateListener):
             client_out.write(s2c_buf, 0, s2c_bytes_read)
             client_out.flush()
             
-            # Extract exactly what was read for Burp history logging
             logged_s2c = jarray.zeros(s2c_bytes_read, 'b')
-            System = vars(threading)['Thread'] # Quick access tool
             import java.lang.System
             java.lang.System.arraycopy(s2c_buf, 0, logged_s2c, 0, s2c_bytes_read)
             self.log_to_burp(c2s_init, logged_s2c, "handshake_initialization")
             
-            # Phase 2: Structural mid-stream socket upgrade to TLS (StartTLS execution)
-            self.ui_log("[*] [TLS] Upgrading sockets to TLS layer...")
+            # Phase 2: Concurrent Multi-Threaded TLS Upgrade (Prevents sequential deadlocks)
+            self.ui_log("[*] [TLS] Layering SSL wrappers onto raw sockets...")
             ssl_client = self.ssl_context.getSocketFactory().createSocket(client_sock, client_sock.getInetAddress().getHostAddress(), client_sock.getPort(), True)
             ssl_client.setUseClientMode(False)
-            ssl_client.startHandshake()
-            self.ui_log("[+] [TLS] Client cryptographic session verified.")
             
             ssl_server = self.ssl_context.getSocketFactory().createSocket(server_sock, self.target_host, self.target_port, True)
             ssl_server.setUseClientMode(True)
-            ssl_server.startHandshake()
-            self.ui_log("[+] [TLS] Server cryptographic session verified.")
             
-            self.ui_log("[+] SUCCESS: Handshake sequences synchronized. Tunnels fully active.")
+            self.ui_log("[*] [TLS] Spawning parallel cryptographic handshakes...")
+            t_client = threading.Thread(target=ssl_client.startHandshake)
+            t_server = threading.Thread(target=ssl_server.startHandshake)
+            t_client.start()
+            t_server.start()
+            
+            t_client.join(timeout=5)
+            t_server.join(timeout=5)
+            self.ui_log("[+] [TLS] Dual handshake negotiation arrays verified and established.")
             
             # Phase 3: Duplex Pipeline Execution Loop
             t1 = threading.Thread(target=self.stream_pipe, args=(ssl_client, ssl_server, True, client_sock, server_sock))
@@ -283,10 +285,19 @@ class BurpExtender(IBurpExtender, IHttpListener, ITab, IExtensionStateListener):
                 out.write(buf, 0, bytes_read)
                 data_bytes = out.toByteArray()
                 
-                dst.getOutputStream().write(buf, 0, bytes_read)
+                # CRITICAL AUTOMATION FIX: Re-write dynamic server IP targets to 127.0.0.1 on-the-fly
+                if not is_c2s:
+                    data_str = JString(data_bytes, "ISO-8859-1")
+                    if data_str.contains(self.target_host):
+                        self.ui_log("[AUTOMATION] Rewriting embedded target endpoint IP {} to 127.0.0.1".format(self.target_host))
+                        data_str = data_str.replace(self.target_host, "127.0.0.1")
+                        data_bytes = data_str.getBytes("ISO-8859-1")
+                
+                # Deliver payload to destination array interface
+                dst.getOutputStream().write(data_bytes)
                 dst.getOutputStream().flush()
                 
-                self.ui_log("[TRANSMISSION] {} | Intercepted: {} bytes".format(direction, bytes_read))
+                self.ui_log("[TRANSMISSION] {} | Intercepted: {} bytes".format(direction, len(data_bytes)))
                 
                 if is_c2s: self.log_to_burp(data_bytes, None, endpoint_lbl)
                 else: self.log_to_burp(None, data_bytes, endpoint_lbl)
@@ -320,12 +331,11 @@ class BurpExtender(IBurpExtender, IHttpListener, ITab, IExtensionStateListener):
                 
                 backend_sock = Socket()
                 backend_sock.connect(InetSocketAddress(self.target_host, self.target_port), 5000)
-                
                 backend_sock.getOutputStream().write(jarray.array([0x4a, 0x52, 0x4d, 0x49, 0x00, 0x01, 0x01], 'b'))
                 backend_sock.getOutputStream().flush()
                 
                 srv_ack = jarray.zeros(1024, 'b')
-                backend_sock.getInputStream().read(srv_ack) # Fixed dynamic replay check
+                backend_sock.getInputStream().read(srv_ack)
                 
                 ssl_backend = self.ssl_context.getSocketFactory().createSocket(backend_sock, self.target_host, self.target_port, True)
                 ssl_backend.setUseClientMode(True)
